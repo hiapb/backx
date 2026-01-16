@@ -449,7 +449,7 @@ main_menu() {
     echo "1) 整站备份"
     echo "2) 整站恢复"
     echo "3) 数据备份"
-    echo "4) 数据恢复"
+    echo "4) 恢复数据"
     echo "5) 查看状态"
     echo "6) 自动备份设置"
     echo "7) 查看自动备份"
@@ -470,11 +470,12 @@ main_menu() {
       6) setup_auto_backup_menu "$workdir" "$self_path" ;;
       7) show_cron ;;
       8) delete_cron ;;
-      9) echo "再见."; exit 0 ;;
+      9) echo "Bye."; exit 0 ;;
       *) echo "无效选择：$choice_raw" ;;
     esac
   done
 }
+
 
 # ---- Non-interactive modes (for cron) ----
 main_noninteractive() {
