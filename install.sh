@@ -417,18 +417,18 @@ main_menu() {
 
   while true; do
     print_header "$workdir"
-    echo "01) 整站备份"
-    echo "02) 整站恢复"
-    echo "03) 数据备份"
-    echo "04) 数据恢复"
-    echo "05) 查看状态"
-    echo "06) 自动备份设置"
-    echo "07) 查看自动备份"
-    echo "08) 删除自动备份"
-    echo "09) 退出"
+    echo "1) 整站备份"
+    echo "2) 整站恢复"
+    echo "3) 数据备份"
+    echo "4) 数据恢复"
+    echo "5) 查看状态"
+    echo "6) 自动备份设置"
+    echo "7) 查看自动备份"
+    echo "8) 删除自动备份"
+    echo "0) 退出"
     echo
 
-    read -r -p "请选择 [01-09]: " choice_raw
+    read -r -p "请选择 [1-9]: " choice_raw
     local choice
     choice="$(normalize_choice "$choice_raw")"
 
@@ -441,7 +441,7 @@ main_menu() {
       6) setup_auto_backup_menu "$workdir" "$self_path" ;;
       7) show_cron ;;
       8) delete_cron ;;
-      9) echo "Bye."; exit 0 ;;
+      0) echo "Bye."; exit 0 ;;
       *) echo "无效选择：$choice_raw" ;;
     esac
   done
