@@ -99,9 +99,8 @@ wait_mysql_ready() {
   return 1
 }
 
-# MySQL dump command (GTID-safe)
+
 mysql_dump_cmd() {
-  # --set-gtid-purged=OFF 解决 GTID 警告/恢复兼容性问题
   cat <<'EOF'
 mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" \
   --single-transaction \
@@ -122,17 +121,17 @@ backup_full_online() {
   rm -rf "$backup_dir"
   mkdir -p "$backup_dir/site_files" "$backup_dir/db" "$backup_dir/meta"
 
-  info "\n== 整站备份（在线，不暂停；覆盖整站包）=="
+  info "\n== 整站备份=="
   info "[1/4] 复制站点文件..."
   for f in "${SITE_FILES[@]}"; do
     cp -f "$workdir/$f" "$backup_dir/site_files/"
   done
 
-  info "[2/4] 在线导出 MySQL（事务一致）..."
+  info "[2/4] 在线导出 MySQL..."
   container_exists "$MYSQL_CONTAINER" || die "找不到 MySQL 容器：$MYSQL_CONTAINER"
   docker exec "$MYSQL_CONTAINER" sh -c "$(mysql_dump_cmd)" | gzip -9 > "$backup_dir/db/relayx.sql.gz"
 
-  info "[3/4] Redis（可选）：触发 BGSAVE（不暂停）..."
+  info "[3/4] Redis（可选）：触发 BGSAVE..."
   if container_exists "$REDIS_CONTAINER"; then
     docker exec "$REDIS_CONTAINER" sh -c 'redis-cli BGSAVE >/dev/null 2>&1 || true'
   else
@@ -163,12 +162,12 @@ backup_data_online() {
   rm -rf "$backup_dir"
   mkdir -p "$backup_dir/db" "$backup_dir/meta"
 
-  info "\n== 数据备份（在线，不暂停；覆盖数据包）=="
-  info "[1/2] 在线导出 MySQL（事务一致）..."
+  info "\n== 数据备份=="
+  info "[1/2] 在线导出 MySQL..."
   container_exists "$MYSQL_CONTAINER" || die "找不到 MySQL 容器：$MYSQL_CONTAINER"
   docker exec "$MYSQL_CONTAINER" sh -c "$(mysql_dump_cmd)" | gzip -9 > "$backup_dir/db/relayx.sql.gz"
 
-  info "[可选] Redis：触发 BGSAVE（不暂停）..."
+  info "[可选] Redis：触发 BGSAVE..."
   if container_exists "$REDIS_CONTAINER"; then
     docker exec "$REDIS_CONTAINER" sh -c 'redis-cli BGSAVE >/dev/null 2>&1 || true'
   fi
@@ -228,8 +227,8 @@ restore_data_from_data_bundle() {
   [[ -f "$data_bundle" ]] || die "找不到数据备份包：$data_bundle（请先做一次“数据备份”）"
 
   info "\n== 数据恢复（使用数据备份包）=="
-  read -r -p "确认恢复数据库？会覆盖当前数据库。输入 YES 继续: " ans
-  [[ "$ans" == "YES" ]] || { info "已取消。\n"; return; }
+  read -r -p "确认恢复数据库？会覆盖当前数据库。输入 y 继续: " ans
+  [[ "$ans" == "y" ]] || { info "已取消。\n"; return; }
 
   info "[1/5] 停止服务..."
   compose_in_dir "$workdir" down || true
@@ -268,8 +267,8 @@ restore_full_from_site_bundle() {
   [[ -f "$site_bundle" ]] || die "找不到整站备份包：$site_bundle（请先做一次“整站备份”）"
 
   info "\n== 整站恢复（使用整站备份包）=="
-  read -r -p "确认整站恢复？会覆盖当前配置+数据库。输入 YES 继续: " ans
-  [[ "$ans" == "YES" ]] || { info "已取消。\n"; return; }
+  read -r -p "确认整站恢复？会覆盖当前配置+数据库。输入 y 继续: " ans
+  [[ "$ans" == "y" ]] || { info "已取消。\n"; return; }
 
   info "[1/6] 停止服务..."
   compose_in_dir "$workdir" down || true
@@ -318,7 +317,7 @@ show_status() {
   [[ -f "$workdir/$SITE_BUNDLE_NAME" ]] && ls -lah "$workdir/$SITE_BUNDLE_NAME" || echo "  (无整站备份包)"
   [[ -f "$workdir/$DATA_BUNDLE_NAME" ]] && ls -lah "$workdir/$DATA_BUNDLE_NAME" || echo "  (无数据备份包)"
 
-  info "\n提示：把 *.tar.gz 记得额外备份到异地（NAS/另一台机/对象存储）。\n"
+  info "\n提示：把 *.tar.gz 记得额外备份。\n"
 }
 
 # ---- Cron / Auto backup ----
@@ -369,7 +368,7 @@ setup_auto_backup_menu() {
   info "将写入：$CRON_FILE （覆盖更新）"
   info "日志：/var/log/relayx_full_backup.log  /var/log/relayx_data_backup.log\n"
 
-  info "【整站备份】建议每天一次（在线，不暂停）。"
+  info "【整站备份】建议每天一次。"
   read -r -p "请输入每天整站备份时间 (HH:MM)，例如 02:30 ：" full_time
   if [[ ! "$full_time" =~ ^([01]?[0-9]|2[0-3]):[0-5][0-9]$ ]]; then
     die "时间格式不对，应为 HH:MM（如 02:30）"
@@ -380,7 +379,7 @@ setup_auto_backup_menu() {
   full_m="$(echo "$full_m" | sed 's/^0\+//')"; [[ -z "$full_m" ]] && full_m="0"
   local full_spec="${full_m} ${full_h} * * *"
 
-  info "\n【数据备份】建议每 N 分钟一次（在线，不暂停）。"
+  info "\n【数据备份】建议每 N 分钟一次。"
   read -r -p "请输入间隔分钟数 N（例如 30 表示每 30 分钟）： " n
   n="$(normalize_choice "$n")"
   [[ "$n" =~ ^[0-9]+$ ]] || die "N 必须是数字"
@@ -399,8 +398,8 @@ print_header() {
   info "======================================"
   info " RelayX 整站备份/恢复 菜单"
   info " 当前目录: $workdir"
-  info " 整站包:   $workdir/$SITE_BUNDLE_NAME (覆盖式)"
-  info " 数据包:   $workdir/$DATA_BUNDLE_NAME (覆盖式)"
+  info " 整站包:   $workdir/$SITE_BUNDLE_NAME"
+  info " 数据包:   $workdir/$DATA_BUNDLE_NAME"
   info "======================================"
 }
 
@@ -421,7 +420,7 @@ main_menu() {
     echo "01) 整站备份"
     echo "02) 整站恢复"
     echo "03) 数据备份"
-    echo "04) 恢复（先数据再整站）"
+    echo "04) 数据恢复"
     echo "05) 查看状态"
     echo "06) 自动备份设置"
     echo "07) 查看自动备份"
