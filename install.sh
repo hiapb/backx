@@ -454,7 +454,7 @@ main_menu() {
     echo "6) 自动备份设置"
     echo "7) 查看自动备份"
     echo "8) 删除自动备份"
-    echo "0) 退出"
+    echo "9) 退出"
     echo
 
     read -r -p "请选择: " choice_raw
@@ -470,7 +470,7 @@ main_menu() {
       6) setup_auto_backup_menu "$workdir" "$self_path" ;;
       7) show_cron ;;
       8) delete_cron ;;
-      0) echo "ヾ(•ω•`)o再见."; exit 0 ;;
+      9) echo "ヾ(•ω•`)o再见."; exit 0 ;;
       *) echo "无效选择：$choice_raw" ;;
     esac
   done
