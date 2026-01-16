@@ -368,22 +368,51 @@ setup_auto_backup_menu() {
   info "将写入：$CRON_FILE （覆盖更新）"
   info "日志：/var/log/relayx_full_backup.log  /var/log/relayx_data_backup.log\n"
 
+  # ===== 获取每天整站备份时间=====
   info "【整站备份】建议每天一次。"
-  read -r -p "请输入每天整站备份时间 (HH:MM)，例如 02:30 ：" full_time
-  if [[ ! "$full_time" =~ ^([01]?[0-9]|2[0-3]):[0-5][0-9]$ ]]; then
-    die "时间格式不对，应为 HH:MM（如 02:30）"
-  fi
+  local full_time=""
+  while true; do
+    read -r -p "请输入每天整站备份时间 (HH:MM)，例如 02:30 ：" full_time
+    full_time="${full_time// /}"
+
+    # 允许 4:00 这种写法，自动补零成 04:00
+    if [[ "$full_time" =~ ^([0-9]|[01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+      local h="${full_time%:*}"
+      local m="${full_time#*:}"
+      if [[ ${#h} -eq 1 ]]; then h="0$h"; fi
+      full_time="$h:$m"
+      break
+    fi
+
+    warn "时间格式不对，应为 HH:MM（如 02:30 / 4:00 / 04:00）。请重新输入。"
+  done
+
   local full_h="${full_time%:*}"
   local full_m="${full_time#*:}"
+  # strip leading zero safely
   full_h="$(echo "$full_h" | sed 's/^0\+//')"; [[ -z "$full_h" ]] && full_h="0"
   full_m="$(echo "$full_m" | sed 's/^0\+//')"; [[ -z "$full_m" ]] && full_m="0"
   local full_spec="${full_m} ${full_h} * * *"
 
-  info "\n【数据备份】建议每 N 分钟一次。"
-  read -r -p "请输入间隔分钟数 N（例如 30 表示每 30 分钟）： " n
-  n="$(normalize_choice "$n")"
-  [[ "$n" =~ ^[0-9]+$ ]] || die "N 必须是数字"
-  (( n >= 1 && n <= 1440 )) || die "N 建议 1~1440 分钟之间"
+  # ===== 获取数据备份间隔分钟（循环直到正确）=====
+  info "\n【数据备份】建议每 N 分钟一次（在线，不暂停）。"
+  local n_raw=""
+  local n=""
+  while true; do
+    read -r -p "请输入间隔分钟数 N（例如 30 表示每 30 分钟）： " n_raw
+    n="$(normalize_choice "$n_raw")"
+
+    if [[ ! "$n" =~ ^[0-9]+$ ]]; then
+      warn "N 必须是数字，请重新输入。"
+      continue
+    fi
+    if (( n < 1 || n > 1440 )); then
+      warn "N 范围建议 1~1440 分钟，请重新输入。"
+      continue
+    fi
+    break
+  done
+
   local data_spec="*/${n} * * * *"
 
   write_cron "$full_spec" "$data_spec" "$self_path" "$workdir"
