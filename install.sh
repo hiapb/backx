@@ -470,7 +470,7 @@ main_menu() {
       6) setup_auto_backup_menu "$workdir" "$self_path" ;;
       7) show_cron ;;
       8) delete_cron ;;
-      9) echo "ヾ(•ω•`)o再见."; exit 0 ;;
+      9) echo "再见."; exit 0 ;;
       *) echo "无效选择：$choice_raw" ;;
     esac
   done
