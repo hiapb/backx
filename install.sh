@@ -76,8 +76,10 @@ ensure_site_files_exist() {
 
 compose_in_dir() {
   local workdir="$1"
+  shift
   (cd "$workdir" && docker compose "$@")
 }
+
 
 container_exists() {
   local name="$1"
