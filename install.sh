@@ -457,7 +457,7 @@ main_menu() {
     echo "0) 退出"
     echo
 
-    read -r -p "请选择 [1-9]: " choice_raw
+    read -r -p "请选择: " choice_raw
     local choice
     choice="$(normalize_choice "$choice_raw")"
 
@@ -470,7 +470,7 @@ main_menu() {
       6) setup_auto_backup_menu "$workdir" "$self_path" ;;
       7) show_cron ;;
       8) delete_cron ;;
-      0) echo "Bye."; exit 0 ;;
+      0) echo "ヾ(•ω•`)o再见."; exit 0 ;;
       *) echo "无效选择：$choice_raw" ;;
     esac
   done
