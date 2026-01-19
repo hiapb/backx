@@ -450,7 +450,7 @@ write_root_crontab_replace_block() {
 }
 
 show_relayx_cron_numbered() {
-  info "\n当前 RelayX 自动备份任务（系统 crontab）："
+  info "\n当前 RelayX 自动备份任务："
   local block
   block="$(extract_relayx_block)"
 
