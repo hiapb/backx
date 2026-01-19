@@ -18,8 +18,12 @@ DATA_BUNDLE_NAME="data_backup_latest.tar.gz"
 # Site files expected in relayx dir
 SITE_FILES=("compose.yaml" ".env" "Caddyfile")
 
-# Cron file (root)
-CRON_FILE="/etc/cron.d/relayx-backup"
+# ===== Cron (system crontab) settings =====
+INSTALL_PATH="/usr/local/bin/relayx-backup"
+CRON_TAG_BEGIN="# RELAYX_BACKUP_BEGIN"
+CRON_TAG_END="# RELAYX_BACKUP_END"
+FULL_LOG="/var/log/relayx_full_backup.log"
+DATA_LOG="/var/log/relayx_data_backup.log"
 
 # ---- Utilities ----
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Missing command: $1"; exit 1; }; }
@@ -34,6 +38,52 @@ normalize_choice() {
 info() { echo -e "$*"; }
 warn() { echo -e "WARN: $*" >&2; }
 die() { echo -e "ERROR: $*" >&2; exit 1; }
+
+# ===== cron dependencies (best-effort) =====
+run_with_sudo_if_needed() {
+  if [[ $EUID -eq 0 ]]; then
+    bash -c "$*"
+  else
+    if command -v sudo >/dev/null 2>&1; then
+      sudo bash -c "$*"
+    else
+      die "当前不是 root，且系统没有 sudo，无法自动安装 cron 依赖。请手动安装 cron/cronie。"
+    fi
+  fi
+}
+
+install_cron_if_needed() {
+  if command -v crontab >/dev/null 2>&1; then
+    return 0
+  fi
+
+  warn "未检测到 crontab，尝试自动安装 cron/cronie（best-effort）..."
+
+  if command -v apt-get >/dev/null 2>&1; then
+    run_with_sudo_if_needed "apt-get update -y && apt-get install -y cron"
+  elif command -v yum >/dev/null 2>&1; then
+    run_with_sudo_if_needed "yum install -y cronie"
+  elif command -v dnf >/dev/null 2>&1; then
+    run_with_sudo_if_needed "dnf install -y cronie"
+  elif command -v zypper >/dev/null 2>&1; then
+    run_with_sudo_if_needed "zypper install -y cron"
+  elif command -v pacman >/dev/null 2>&1; then
+    run_with_sudo_if_needed "pacman -Sy --noconfirm cronie"
+  else
+    die "未找到常见包管理器，无法自动安装 cron。请手动安装 cron/cronie。"
+  fi
+
+  command -v crontab >/dev/null 2>&1 || die "安装后仍未检测到 crontab，请手动检查系统。"
+
+  # Try enable/start service (ignore failures)
+  if command -v systemctl >/dev/null 2>&1; then
+    for svc in cron crond cronie; do
+      if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
+        run_with_sudo_if_needed "systemctl enable --now ${svc}.service" || true
+      fi
+    done
+  fi
+}
 
 # Find relayx directory:
 # 1) RELAYX_DIR env
@@ -98,7 +148,6 @@ wait_mysql_ready() {
   done
   return 1
 }
-
 
 mysql_dump_cmd() {
   cat <<'EOF'
@@ -194,7 +243,6 @@ restore_data_default_then_optional_full() {
 
   info "\n== 恢复菜单（先数据，再整站）=="
 
-  # 先优先问：是否用数据恢复（默认 y）
   if [[ -f "$data_bundle" ]]; then
     read -r -p "是否使用【数据恢复】（推荐，导入 data_backup）？(Y/n): " ans_data
     if [[ -z "${ans_data:-}" || "${ans_data:-}" =~ ^[Yy]$ ]]; then
@@ -203,10 +251,8 @@ restore_data_default_then_optional_full() {
     fi
   else
     warn "未找到数据备份包：$data_bundle"
-    # 没有数据包就直接进入整站选择
   fi
 
-  # 数据恢复选了否，或者压根没有数据包 → 再提示整站
   if [[ -f "$site_bundle" ]]; then
     read -r -p "是否改用【整站恢复】（导入 site_backup，覆盖配置+数据库）？(y/N): " ans_site
     if [[ "${ans_site:-}" =~ ^[Yy]$ ]]; then
@@ -320,53 +366,133 @@ show_status() {
   info "\n提示：把 *.tar.gz 记得额外备份。\n"
 }
 
-# ---- Cron / Auto backup ----
-write_cron() {
-  local full_spec="$1"   # e.g. "30 2 * * *"
-  local data_spec="$2"   # e.g. "*/30 * * * *"
-  local script_path="$3"
-  local workdir="$4"
+# ---- System crontab management (RelayX block only) ----
 
-  [[ "$script_path" = /* ]] || die "script_path 必须是绝对路径"
+install_self_to() {
+  local target="$1"
+  mkdir -p "$(dirname "$target")"
 
-  cat > "$CRON_FILE" <<EOF
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+  local src
+  src="$(readlink -f "${BASH_SOURCE[0]}")" || true
 
-# RelayX backups (auto-generated)
-${full_spec} root RELAYX_DIR=${workdir} ${script_path} full-backup >/var/log/relayx_full_backup.log 2>&1
-${data_spec} root RELAYX_DIR=${workdir} ${script_path} data-backup >/var/log/relayx_data_backup.log 2>&1
-EOF
-
-  chmod 644 "$CRON_FILE"
-}
-
-delete_cron() {
-  if [[ -f "$CRON_FILE" ]]; then
-    rm -f "$CRON_FILE"
-    info "已删除定时任务：$CRON_FILE\n"
-  else
-    info "没有发现定时任务：$CRON_FILE\n"
+  if [[ "$src" == /proc/*/fd/pipe:* || "$src" == /proc/*/fd/* ]]; then
+    die "你现在是通过临时管道运行脚本（$src），cron 不能引用它。
+请先把脚本保存为真实文件再运行一次，然后再用菜单设置自动备份。"
   fi
+
+  cp -f "$src" "$target"
+  chmod 755 "$target"
 }
 
-show_cron() {
-  if [[ -f "$CRON_FILE" ]]; then
-    info "\n当前定时任务（$CRON_FILE）："
-    sed -n '1,200p' "$CRON_FILE"
+get_root_crontab_clean() {
+  crontab -l 2>/dev/null || true
+}
+
+extract_relayx_block() {
+  get_root_crontab_clean | sed -n "/^${CRON_TAG_BEGIN}$/,/^${CRON_TAG_END}$/p"
+}
+
+write_root_crontab_replace_block() {
+  local block="$1"
+  local tmp
+  tmp="$(mktemp)"
+
+  get_root_crontab_clean > "$tmp"
+  sed -i "/^${CRON_TAG_BEGIN}$/,/^${CRON_TAG_END}$/d" "$tmp"
+
+  {
     echo
-  else
-    info "\n当前没有 relayx 定时任务（$CRON_FILE 不存在）\n"
+    echo "$block"
+    echo
+  } >> "$tmp"
+
+  crontab "$tmp"
+  rm -f "$tmp"
+}
+
+show_relayx_cron_numbered() {
+  info "\n当前 RelayX 自动备份任务（系统 crontab）："
+  local block
+  block="$(extract_relayx_block)"
+
+  if [[ -z "$block" ]]; then
+    echo "(未设置)"
+    echo
+    return 0
   fi
+
+  echo "$block" | sed "/^${CRON_TAG_BEGIN}$/d;/^${CRON_TAG_END}$/d;/^\s*$/d" | nl -ba
+  echo
+}
+
+delete_relayx_cron_by_lineno() {
+  local linenos="$1"
+
+  local block
+  block="$(extract_relayx_block)"
+  if [[ -z "$block" ]]; then
+    warn "未找到 RelayX 自动备份任务（未设置）。"
+    return 0
+  fi
+
+  local tasks_file
+  tasks_file="$(mktemp)"
+  echo "$block" | sed "/^${CRON_TAG_BEGIN}$/d;/^${CRON_TAG_END}$/d;/^\s*$/d" > "$tasks_file"
+
+  if [[ ! -s "$tasks_file" ]]; then
+    rm -f "$tasks_file"
+    warn "RelayX 任务块为空，无可删除任务。"
+    return 0
+  fi
+
+  if ! echo "$linenos" | grep -Eq '^[0-9 ]+$'; then
+    rm -f "$tasks_file"
+    die "输入格式错误：只能是数字和空格。"
+  fi
+
+  local tasks_after
+  tasks_after="$(mktemp)"
+  cp -f "$tasks_file" "$tasks_after"
+
+  local sed_cmd=()
+  for n in $linenos; do
+    sed_cmd+=("-e" "${n}d")
+  done
+
+  local tasks_final
+  tasks_final="$(mktemp)"
+  sed "${sed_cmd[@]}" "$tasks_after" > "$tasks_final" || true
+
+  # Rebuild block or delete it if empty
+  local tmp
+  tmp="$(mktemp)"
+  get_root_crontab_clean > "$tmp"
+  sed -i "/^${CRON_TAG_BEGIN}$/,/^${CRON_TAG_END}$/d" "$tmp"
+
+  if [[ -s "$tasks_final" ]]; then
+    {
+      echo
+      echo "${CRON_TAG_BEGIN}"
+      cat "$tasks_final"
+      echo "${CRON_TAG_END}"
+      echo
+    } >> "$tmp"
+  fi
+
+  crontab "$tmp"
+
+  rm -f "$tmp" "$tasks_file" "$tasks_after" "$tasks_final"
+  info "✅ 删除完成。\n"
 }
 
 setup_auto_backup_menu() {
   local workdir="$1"
-  local self_path="$2"
 
-  info "\n== 自动备份设置 =="
-  info "将写入：$CRON_FILE （覆盖更新）"
-  info "日志：/var/log/relayx_full_backup.log  /var/log/relayx_data_backup.log\n"
+  install_cron_if_needed
+
+  info "\n== 自动备份设置（系统 crontab）=="
+  info "将写入：root 的 crontab（只管理 RelayX 区块，不影响其他任务）"
+  info "日志：${FULL_LOG}  ${DATA_LOG}\n"
 
   # ===== 获取每天整站备份时间=====
   info "【整站备份】建议每天一次。"
@@ -375,7 +501,6 @@ setup_auto_backup_menu() {
     read -r -p "请输入每天整站备份时间 (HH:MM)，例如 02:30 ：" full_time
     full_time="${full_time// /}"
 
-    # 允许 4:00 这种写法，自动补零成 04:00
     if [[ "$full_time" =~ ^([0-9]|[01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
       local h="${full_time%:*}"
       local m="${full_time#*:}"
@@ -389,12 +514,11 @@ setup_auto_backup_menu() {
 
   local full_h="${full_time%:*}"
   local full_m="${full_time#*:}"
-  # strip leading zero safely
   full_h="$(echo "$full_h" | sed 's/^0\+//')"; [[ -z "$full_h" ]] && full_h="0"
   full_m="$(echo "$full_m" | sed 's/^0\+//')"; [[ -z "$full_m" ]] && full_m="0"
   local full_spec="${full_m} ${full_h} * * *"
 
-  # ===== 获取数据备份间隔分钟（循环直到正确）=====
+  # ===== 获取数据备份间隔分钟=====
   info "\n【数据备份】建议每 N 分钟一次（在线，不暂停）。"
   local n_raw=""
   local n=""
@@ -415,9 +539,21 @@ setup_auto_backup_menu() {
 
   local data_spec="*/${n} * * * *"
 
-  write_cron "$full_spec" "$data_spec" "$self_path" "$workdir"
-  info "\n✅ 定时任务已设置。\n"
-  show_cron
+  # Install to stable path, then write crontab block
+  install_self_to "$INSTALL_PATH"
+
+  local block
+  block=$(cat <<EOF
+${CRON_TAG_BEGIN}
+${full_spec} RELAYX_DIR=${workdir} ${INSTALL_PATH} full-backup >>${FULL_LOG} 2>&1
+${data_spec} RELAYX_DIR=${workdir} ${INSTALL_PATH} data-backup >>${DATA_LOG} 2>&1
+${CRON_TAG_END}
+EOF
+)
+
+  write_root_crontab_replace_block "$block"
+  info "\n✅ 已设置系统 crontab 定时任务（root）。\n"
+  show_relayx_cron_numbered
   info "注意：cron 通常自动生效；如你的系统没启 cron，需要启动 cron 服务。\n"
 }
 
@@ -441,9 +577,6 @@ main_menu() {
   workdir="$(find_relayx_dir)"
   cd "$workdir"
 
-  local self_path
-  self_path="$(readlink -f "${BASH_SOURCE[0]}")"
-
   while true; do
     print_header "$workdir"
     echo "1) 整站备份"
@@ -451,9 +584,9 @@ main_menu() {
     echo "3) 数据备份"
     echo "4) 恢复数据"
     echo "5) 查看状态"
-    echo "6) 自动备份设置"
-    echo "7) 查看自动备份"
-    echo "8) 删除自动备份"
+    echo "6) 自动备份设置（系统 crontab）"
+    echo "7) 查看自动备份（系统 crontab）"
+    echo "8) 删除自动备份（系统 crontab）"
     echo "9) 退出"
     echo
 
@@ -467,15 +600,23 @@ main_menu() {
       3) backup_data_online "$workdir" ;;
       4) restore_data_default_then_optional_full "$workdir" ;;
       5) show_status "$workdir" ;;
-      6) setup_auto_backup_menu "$workdir" "$self_path" ;;
-      7) show_cron ;;
-      8) delete_cron ;;
+      6) setup_auto_backup_menu "$workdir" ;;
+      7) show_relayx_cron_numbered ;;
+      8)
+         show_relayx_cron_numbered
+         read -r -p "请输入要删除的行号（多个用空格），回车取消： " line_nums
+         if [[ -z "${line_nums:-}" ]]; then
+           info "已取消。\n"
+         else
+           delete_relayx_cron_by_lineno "$line_nums"
+           show_relayx_cron_numbered
+         fi
+         ;;
       9) echo "Bye."; exit 0 ;;
       *) echo "无效选择：$choice_raw" ;;
     esac
   done
 }
-
 
 # ---- Non-interactive modes (for cron) ----
 main_noninteractive() {
