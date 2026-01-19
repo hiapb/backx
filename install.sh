@@ -3,7 +3,19 @@ set -euo pipefail
 
 # =========================
 # RelayX Backup & Restore
+# + System crontab auto-backup
+# + Self-update to stable path
 # =========================
+
+# ===== Self Update =====
+SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/hiapb/backx/main/install.sh}"
+INSTALL_PATH="${INSTALL_PATH:-/usr/local/bin/relayx-backup}"
+
+# ===== Cron block tags (root crontab) =====
+CRON_TAG_BEGIN="# RELAYX_BACKUP_BEGIN"
+CRON_TAG_END="# RELAYX_BACKUP_END"
+FULL_LOG="/var/log/relayx_full_backup.log"
+DATA_LOG="/var/log/relayx_data_backup.log"
 
 # ---- Defaults (can override with env) ----
 DEFAULT_RELAYX_DIR="/root/relayx"
@@ -17,13 +29,6 @@ DATA_BUNDLE_NAME="data_backup_latest.tar.gz"
 
 # Site files expected in relayx dir
 SITE_FILES=("compose.yaml" ".env" "Caddyfile")
-
-# ===== Cron (system crontab) settings =====
-INSTALL_PATH="/usr/local/bin/relayx-backup"
-CRON_TAG_BEGIN="# RELAYX_BACKUP_BEGIN"
-CRON_TAG_END="# RELAYX_BACKUP_END"
-FULL_LOG="/var/log/relayx_full_backup.log"
-DATA_LOG="/var/log/relayx_data_backup.log"
 
 # ---- Utilities ----
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "Missing command: $1"; exit 1; }; }
@@ -39,7 +44,7 @@ info() { echo -e "$*"; }
 warn() { echo -e "WARN: $*" >&2; }
 die() { echo -e "ERROR: $*" >&2; exit 1; }
 
-# ===== cron dependencies (best-effort) =====
+# ===== Best-effort cron deps install (optional) =====
 run_with_sudo_if_needed() {
   if [[ $EUID -eq 0 ]]; then
     bash -c "$*"
@@ -82,6 +87,57 @@ install_cron_if_needed() {
         run_with_sudo_if_needed "systemctl enable --now ${svc}.service" || true
       fi
     done
+  fi
+}
+
+# ===== Self-update bootstrap =====
+download_to_install_path() {
+  mkdir -p "$(dirname "$INSTALL_PATH")"
+
+  local tmp
+  tmp="$(mktemp)"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$SCRIPT_URL" -o "$tmp" || { rm -f "$tmp"; return 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$tmp" "$SCRIPT_URL" || { rm -f "$tmp"; return 1; }
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  cp -f "$tmp" "$INSTALL_PATH"
+  chmod 755 "$INSTALL_PATH"
+  rm -f "$tmp"
+  return 0
+}
+
+bootstrap_to_installed() {
+  # Avoid infinite loop
+  if [[ "${RELAYX_BOOTSTRAPPED:-}" == "1" ]]; then
+    return 0
+  fi
+
+  # Download/update (best-effort). If fails, continue running current script.
+  if download_to_install_path; then
+    # If current execution is not the installed file, exec into installed file (so menus keep running)
+    # BASH_SOURCE[0] might be /dev/fd/* when run via bash <(curl ...)
+    local cur
+    cur="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+    local installed
+    installed="$(readlink -f "$INSTALL_PATH" 2>/dev/null || true)"
+
+    if [[ -n "$installed" && "$cur" != "$installed" ]]; then
+      export RELAYX_BOOTSTRAPPED=1
+      exec "$INSTALL_PATH" "$@"
+    fi
+  else
+    warn "自动下载更新失败（缺少 curl/wget 或网络问题）。将继续使用当前脚本运行。"
   fi
 }
 
@@ -367,23 +423,6 @@ show_status() {
 }
 
 # ---- System crontab management (RelayX block only) ----
-
-install_self_to() {
-  local target="$1"
-  mkdir -p "$(dirname "$target")"
-
-  local src
-  src="$(readlink -f "${BASH_SOURCE[0]}")" || true
-
-  if [[ "$src" == /proc/*/fd/pipe:* || "$src" == /proc/*/fd/* ]]; then
-    die "你现在是通过临时管道运行脚本（$src），cron 不能引用它。
-请先把脚本保存为真实文件再运行一次，然后再用菜单设置自动备份。"
-  fi
-
-  cp -f "$src" "$target"
-  chmod 755 "$target"
-}
-
 get_root_crontab_clean() {
   crontab -l 2>/dev/null || true
 }
@@ -447,33 +486,33 @@ delete_relayx_cron_by_lineno() {
 
   if ! echo "$linenos" | grep -Eq '^[0-9 ]+$'; then
     rm -f "$tasks_file"
-    die "输入格式错误：只能是数字和空格。"
+    warn "输入格式错误：只能是数字和空格。已取消删除。"
+    return 0
   fi
 
-  local tasks_after
-  tasks_after="$(mktemp)"
-  cp -f "$tasks_file" "$tasks_after"
+  local tasks_final
+  tasks_final="$(mktemp)"
+  cp -f "$tasks_file" "$tasks_final"
 
   local sed_cmd=()
   for n in $linenos; do
     sed_cmd+=("-e" "${n}d")
   done
 
-  local tasks_final
-  tasks_final="$(mktemp)"
-  sed "${sed_cmd[@]}" "$tasks_after" > "$tasks_final" || true
+  local tasks_after
+  tasks_after="$(mktemp)"
+  sed "${sed_cmd[@]}" "$tasks_final" > "$tasks_after" || true
 
-  # Rebuild block or delete it if empty
   local tmp
   tmp="$(mktemp)"
   get_root_crontab_clean > "$tmp"
   sed -i "/^${CRON_TAG_BEGIN}$/,/^${CRON_TAG_END}$/d" "$tmp"
 
-  if [[ -s "$tasks_final" ]]; then
+  if [[ -s "$tasks_after" ]]; then
     {
       echo
       echo "${CRON_TAG_BEGIN}"
-      cat "$tasks_final"
+      cat "$tasks_after"
       echo "${CRON_TAG_END}"
       echo
     } >> "$tmp"
@@ -481,7 +520,7 @@ delete_relayx_cron_by_lineno() {
 
   crontab "$tmp"
 
-  rm -f "$tmp" "$tasks_file" "$tasks_after" "$tasks_final"
+  rm -f "$tmp" "$tasks_file" "$tasks_final" "$tasks_after"
   info "✅ 删除完成。\n"
 }
 
@@ -490,7 +529,7 @@ setup_auto_backup_menu() {
 
   install_cron_if_needed
 
-  info "\n== 自动备份设置（系统 crontab）=="
+  info "\n== 自动备份设置=="
   info "将写入：root 的 crontab（只管理 RelayX 区块，不影响其他任务）"
   info "日志：${FULL_LOG}  ${DATA_LOG}\n"
 
@@ -501,6 +540,7 @@ setup_auto_backup_menu() {
     read -r -p "请输入每天整站备份时间 (HH:MM)，例如 02:30 ：" full_time
     full_time="${full_time// /}"
 
+    # 支持 05:00 / 5:00 / 23:59
     if [[ "$full_time" =~ ^([0-9]|[01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
       local h="${full_time%:*}"
       local m="${full_time#*:}"
@@ -514,6 +554,7 @@ setup_auto_backup_menu() {
 
   local full_h="${full_time%:*}"
   local full_m="${full_time#*:}"
+  # strip leading zero safely
   full_h="$(echo "$full_h" | sed 's/^0\+//')"; [[ -z "$full_h" ]] && full_h="0"
   full_m="$(echo "$full_m" | sed 's/^0\+//')"; [[ -z "$full_m" ]] && full_m="0"
   local full_spec="${full_m} ${full_h} * * *"
@@ -539,8 +580,10 @@ setup_auto_backup_menu() {
 
   local data_spec="*/${n} * * * *"
 
-  # Install to stable path, then write crontab block
-  install_self_to "$INSTALL_PATH"
+  # Ensure installed file exists (best-effort). If fails, keep going but cron might fail later.
+  if ! download_to_install_path; then
+    warn "更新 ${INSTALL_PATH} 失败（网络/curl/wget问题）。仍会写入 crontab，但建议先确认 ${INSTALL_PATH} 可用。"
+  fi
 
   local block
   block=$(cat <<EOF
@@ -584,9 +627,9 @@ main_menu() {
     echo "3) 数据备份"
     echo "4) 恢复数据"
     echo "5) 查看状态"
-    echo "6) 自动备份设置（系统 crontab）"
-    echo "7) 查看自动备份（系统 crontab）"
-    echo "8) 删除自动备份（系统 crontab）"
+    echo "6) 自动备份设置"
+    echo "7) 查看自动备份"
+    echo "8) 删除自动备份"
     echo "9) 退出"
     echo
 
@@ -637,6 +680,8 @@ main_noninteractive() {
 }
 
 # Entry
+bootstrap_to_installed "$@"
+
 if [[ $# -ge 1 ]]; then
   main_noninteractive "$1"
 else
